@@ -5,14 +5,11 @@ use tracing::error;
 use crate::block::Block;
 
 /// Checks if the blockchain is valid
-async fn is_chain_valid(
-    chain: impl AsRef<[Block]>,
-    difficulty_prefix: impl AsRef<str>,
-) -> anyhow::Result<bool> {
+async fn is_chain_valid(chain: impl AsRef<[Block]>) -> anyhow::Result<bool> {
     for i in 1..chain.as_ref().len() {
         let first = chain.as_ref().get(i - 1).unwrap();
         let second = chain.as_ref().get(i).unwrap();
-        if !second.is_valid(first, &difficulty_prefix).await? {
+        if !second.is_valid(first).await? {
             return Ok(false);
         }
     }
@@ -21,13 +18,9 @@ async fn is_chain_valid(
 
 /// Choose the longest valid chain from the given set
 // TODO: see the article for details on going deeper here
-async fn choose_chain(
-    local: Vec<Block>,
-    remote: Vec<Block>,
-    difficulty_prefix: impl AsRef<str>,
-) -> anyhow::Result<Vec<Block>> {
-    let is_local_valid = is_chain_valid(&local, &difficulty_prefix).await?;
-    let is_remote_valid = is_chain_valid(&remote, &difficulty_prefix).await?;
+async fn choose_chain(local: Vec<Block>, remote: Vec<Block>) -> anyhow::Result<Vec<Block>> {
+    let is_local_valid = is_chain_valid(&local).await?;
+    let is_remote_valid = is_chain_valid(&remote).await?;
 
     Ok(if is_local_valid && is_remote_valid {
         if local.len() >= remote.len() {
@@ -74,14 +67,10 @@ impl Chain {
     }
 
     /// Attempt to add a block to the chain
-    pub async fn try_add_block(
-        &mut self,
-        block: Block,
-        difficulty_prefix: impl AsRef<str>,
-    ) -> anyhow::Result<bool> {
+    pub async fn try_add_block(&mut self, block: Block) -> anyhow::Result<bool> {
         // only add the new block if it's valid against the latest block
         let latest_block = self.blocks.last().unwrap();
-        if block.is_valid(latest_block, &difficulty_prefix).await? {
+        if block.is_valid(latest_block).await? {
             self.blocks.push(block);
             Ok(true)
         } else {
@@ -92,12 +81,8 @@ impl Chain {
     }
 
     /// Sets this chain's blocks to the remote chain if it is longer
-    pub async fn choose_chain(
-        &mut self,
-        remote: Vec<Block>,
-        difficulty_prefix: impl AsRef<str>,
-    ) -> anyhow::Result<()> {
-        self.blocks = choose_chain(self.blocks.clone(), remote, difficulty_prefix).await?;
+    pub async fn choose_chain(&mut self, remote: Vec<Block>) -> anyhow::Result<()> {
+        self.blocks = choose_chain(self.blocks.clone(), remote).await?;
 
         Ok(())
     }

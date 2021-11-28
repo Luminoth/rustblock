@@ -50,17 +50,9 @@ pub struct Behavior {
     /// mDNS for node discovery
     mdns: Mdns,
 
-    /// Init event sender
-    #[behaviour(ignore)]
-    init_sender: mpsc::UnboundedSender<bool>,
-
     /// Chain response sender
     #[behaviour(ignore)]
     response_sender: mpsc::UnboundedSender<ChainResponse>,
-
-    /// Blockchain difficulty prefix
-    #[behaviour(ignore)]
-    difficulty_prefix: String,
 
     /// Our blockchain
     #[behaviour(ignore)]
@@ -71,16 +63,12 @@ impl Behavior {
     /// Creates a new behavior
     pub async fn new(
         chain: Chain,
-        difficulty_prefix: impl Into<String>,
-        init_sender: mpsc::UnboundedSender<bool>,
         response_sender: mpsc::UnboundedSender<ChainResponse>,
     ) -> anyhow::Result<Self> {
         let mut behaviour = Self {
             protocol: Floodsub::new(*PEER_ID),
             mdns: Mdns::new(Default::default()).await?,
-            init_sender,
             response_sender,
-            difficulty_prefix: difficulty_prefix.into(),
             chain: Arc::new(RwLock::new(chain)),
         };
 
@@ -131,14 +119,8 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
                     resp.blocks.iter().for_each(|r| info!("{:?}", r));
 
                     let chain = self.chain.clone();
-                    let difficulty_prefix = self.difficulty_prefix.clone();
                     tokio::spawn(async move {
-                        chain
-                            .write()
-                            .await
-                            .choose_chain(resp.blocks, &difficulty_prefix)
-                            .await
-                            .unwrap();
+                        chain.write().await.choose_chain(resp.blocks).await.unwrap();
                     });
                 }
             } else if let Ok(resp) = serde_json::from_slice::<LocalChainRequest>(&msg.data) {
@@ -160,14 +142,8 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
                 info!("received new block from {}", msg.source.to_string());
 
                 let chain = self.chain.clone();
-                let difficulty_prefix = self.difficulty_prefix.clone();
                 tokio::spawn(async move {
-                    chain
-                        .write()
-                        .await
-                        .try_add_block(block, &difficulty_prefix)
-                        .await
-                        .unwrap();
+                    chain.write().await.try_add_block(block).await.unwrap();
                 });
             }
         }
@@ -212,20 +188,13 @@ pub async fn handle_create_block(
                 latest_block.id() + 1,
                 latest_block.hash().clone(),
                 data.to_owned(),
-                &behaviour.difficulty_prefix,
             )
             .await?
         };
 
         let json = serde_json::to_string(&block).unwrap();
 
-        if behaviour
-            .chain
-            .write()
-            .await
-            .try_add_block(block, &behaviour.difficulty_prefix)
-            .await?
-        {
+        if behaviour.chain.write().await.try_add_block(block).await? {
             info!("broadcasting new block");
             behaviour
                 .protocol

@@ -4,6 +4,11 @@ use sha2::{Digest, Sha256};
 use tokio::task;
 use tracing::{debug, info, warn};
 
+// TODO: this is overly simplified
+// see the article for more details on how to go deeper here
+// ("00" is relatively easy and quick to mine)
+pub const DIFFICULTY_PREFIX: &str = "00";
+
 /// Convert a hash to its binary string representation
 // TODO: this is an inefficient way to check the difficulty prefix of a hash
 // see the article for more details on how to go deeper here
@@ -51,7 +56,6 @@ async fn mine_block(
     timestamp: i64,
     previous_block_hash: impl Into<String>,
     data: impl Into<String>,
-    difficulty_prefix: impl AsRef<str>,
 ) -> anyhow::Result<(u64, String)> {
     let previous_block_hash = previous_block_hash.into();
     let data = data.into();
@@ -71,7 +75,7 @@ async fn mine_block(
         let hash = calculate_hash(id, timestamp, &previous_block_hash, &data, nonce).await?;
 
         let binary_hash = hash_to_binary_representation(&hash);
-        if binary_hash.starts_with(difficulty_prefix.as_ref()) {
+        if binary_hash.starts_with(DIFFICULTY_PREFIX) {
             info!(
                 "mined! nonce: {}, hash: {}, binary hash: {}",
                 nonce,
@@ -125,14 +129,12 @@ impl Block {
         id: u64,
         previous_block_hash: impl Into<String>,
         data: impl Into<String>,
-        difficulty_prefix: impl AsRef<str>,
     ) -> anyhow::Result<Self> {
         let previous_block_hash = previous_block_hash.into();
         let data = data.into();
 
         let now = Utc::now().timestamp();
-        let (nonce, hash) =
-            mine_block(id, now, &previous_block_hash, &data, difficulty_prefix).await?;
+        let (nonce, hash) = mine_block(id, now, &previous_block_hash, &data).await?;
 
         Ok(Self {
             id,
@@ -155,11 +157,7 @@ impl Block {
     }
 
     /// Checks if this block is valid given a previous block
-    pub async fn is_valid(
-        &self,
-        previous_block: &Block,
-        difficulty_prefix: impl AsRef<str>,
-    ) -> anyhow::Result<bool> {
+    pub async fn is_valid(&self, previous_block: &Block) -> anyhow::Result<bool> {
         // validate the block id
         if self.id != previous_block.id + 1 {
             warn!(
@@ -179,7 +177,7 @@ impl Block {
         // (decoding should be faster than calculating the hash)
         let decoded = hex::decode(&self.hash)?;
         let bin = hash_to_binary_representation(&decoded);
-        if !bin.starts_with(difficulty_prefix.as_ref()) {
+        if !bin.starts_with(DIFFICULTY_PREFIX) {
             warn!("block with id: {} has invalid difficulty", self.id);
             return Ok(false);
         }
