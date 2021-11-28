@@ -44,20 +44,25 @@ pub enum EventType {
 }
 
 #[derive(NetworkBehaviour)]
+#[behaviour(event_process = true)]
 pub struct Behavior {
     /// P2P protocol instance
-    floodsub: Floodsub,
+    protocol: Floodsub,
 
     /// mDNS for node discovery
     mdns: Mdns,
 
     /// Init event sender
     #[behaviour(ignore)]
-    init_sender: mpsc::UnboundedSender<()>,
+    init_sender: mpsc::UnboundedSender<bool>,
 
     /// Chain response sender
     #[behaviour(ignore)]
     response_sender: mpsc::UnboundedSender<ChainResponse>,
+
+    /// Blockchain difficulty prefix
+    #[behaviour(ignore)]
+    difficulty_prefix: String,
 
     /// Our blockchain
     #[behaviour(ignore)]
@@ -68,20 +73,34 @@ impl Behavior {
     /// Creates a new behavior
     pub async fn new(
         chain: Chain,
-        init_sender: mpsc::UnboundedSender<()>,
+        difficulty_prefix: impl Into<String>,
+        init_sender: mpsc::UnboundedSender<bool>,
         response_sender: mpsc::UnboundedSender<ChainResponse>,
     ) -> anyhow::Result<Self> {
         let mut behaviour = Self {
-            floodsub: Floodsub::new(*PEER_ID),
+            protocol: Floodsub::new(*PEER_ID),
             mdns: Mdns::new(Default::default()).await?,
             init_sender,
             response_sender,
+            difficulty_prefix: difficulty_prefix.into(),
             chain,
         };
-        behaviour.floodsub.subscribe(CHAIN_TOPIC.clone());
-        behaviour.floodsub.subscribe(BLOCK_TOPIC.clone());
+        behaviour.protocol.subscribe(CHAIN_TOPIC.clone());
+        behaviour.protocol.subscribe(BLOCK_TOPIC.clone());
 
         Ok(behaviour)
+    }
+
+    pub fn chain(&self) -> &Chain {
+        &self.chain
+    }
+
+    pub fn chain_mut(&mut self) -> &mut Chain {
+        &mut self.chain
+    }
+
+    pub fn protocol_mut(&self) -> &mut Floodsub {
+        &mut self.protocol
     }
 }
 
@@ -92,14 +111,14 @@ impl NetworkBehaviourEventProcess<MdnsEvent> for Behavior {
             // add new nodes
             MdnsEvent::Discovered(discovered_list) => {
                 for (peer, _addr) in discovered_list {
-                    self.floodsub.add_node_to_partial_view(peer);
+                    self.protocol.add_node_to_partial_view(peer);
                 }
             }
             // remove expired nodes
             MdnsEvent::Expired(expired_list) => {
                 for (peer, _addr) in expired_list {
                     if !self.mdns.has_node(&peer) {
-                        self.floodsub.remove_node_from_partial_view(&peer);
+                        self.protocol.remove_node_from_partial_view(&peer);
                     }
                 }
             }
@@ -116,16 +135,17 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
                     info!("Response from {}:", msg.source);
                     resp.blocks.iter().for_each(|r| info!("{:?}", r));
 
-                    self.chain.blocks = self
-                        .chain
-                        .choose_chain(self.chain.blocks.clone(), resp.blocks);
+                    self.chain
+                        .choose_chain(resp.blocks, &self.difficulty_prefix)
+                        .await
+                        .unwrap();
                 }
             } else if let Ok(resp) = serde_json::from_slice::<LocalChainRequest>(&msg.data) {
                 info!("sending local chain to {}", msg.source.to_string());
                 let peer_id = resp.from_peer_id;
                 if PEER_ID.to_string() == peer_id {
                     if let Err(e) = self.response_sender.send(ChainResponse {
-                        blocks: self.chain.blocks.clone(),
+                        blocks: self.chain.blocks().clone(),
                         receiver: msg.source.to_string(),
                     }) {
                         error!("error sending response via channel, {}", e);
@@ -133,7 +153,7 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
                 }
             } else if let Ok(block) = serde_json::from_slice::<Block>(&msg.data) {
                 info!("received new block from {}", msg.source.to_string());
-                self.chain.try_add_block(block);
+                self.chain.try_add_block(block, &self.difficulty_prefix);
             }
         }
     }
@@ -158,24 +178,39 @@ pub fn handle_print_peers(swarm: &Swarm<Behavior>) {
 pub fn handle_print_chain(swarm: &Swarm<Behavior>) {
     info!("Local Blockchain:");
 
-    let pretty_json = serde_json::to_string_pretty(&swarm.behaviour().chain.blocks).unwrap();
+    let pretty_json = serde_json::to_string_pretty(&swarm.behaviour().chain.blocks()).unwrap();
     info!("{}", pretty_json);
 }
 
-pub fn handle_create_block(cmd: impl AsRef<str>, swarm: &mut Swarm<Behavior>) {
-    if let Some(data) = cmd.strip_prefix("create b") {
+pub async fn handle_create_block(
+    cmd: impl AsRef<str>,
+    swarm: &mut Swarm<Behavior>,
+) -> anyhow::Result<()> {
+    if let Some(data) = cmd.as_ref().strip_prefix("create b") {
         let behaviour = swarm.behaviour_mut();
-        let latest_block = behaviour.chain.blocks.last().unwrap();
+
+        let latest_block = behaviour.chain.last().unwrap();
         let block = Block::new(
-            latest_block.id + 1,
-            latest_block.hash.clone(),
+            latest_block.id() + 1,
+            latest_block.hash().clone(),
             data.to_owned(),
-        );
-        let json = serde_json::to_string(&block).expect("can jsonify request");
-        behaviour.chain.blocks.push(block);
-        info!("broadcasting new block");
-        behaviour
-            .floodsub
-            .publish(BLOCK_TOPIC.clone(), json.as_bytes());
+            &behaviour.difficulty_prefix,
+        )
+        .await?;
+
+        let json = serde_json::to_string(&block).unwrap();
+
+        if behaviour
+            .chain
+            .try_add_block(block, &behaviour.difficulty_prefix)
+            .await?
+        {
+            info!("broadcasting new block");
+            behaviour
+                .protocol
+                .publish(BLOCK_TOPIC.clone(), json.as_bytes());
+        }
     }
+
+    Ok(())
 }
