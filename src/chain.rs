@@ -1,3 +1,4 @@
+use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -8,7 +9,6 @@ async fn is_chain_valid(
     chain: impl AsRef<[Block]>,
     difficulty_prefix: impl AsRef<str>,
 ) -> anyhow::Result<bool> {
-    // TODO: there's probably an iterator method for this right?
     for i in 1..chain.as_ref().len() {
         let first = chain.as_ref().get(i - 1).unwrap();
         let second = chain.as_ref().get(i).unwrap();
@@ -40,10 +40,11 @@ async fn choose_chain(
     } else if !is_remote_valid && is_local_valid {
         local
     } else {
-        panic!("local and remote chains are both invalid");
+        bail!("local and remote chains are both invalid");
     })
 }
 
+/// Holds the blockchain
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Chain {
     /// The blockchain
@@ -51,7 +52,7 @@ pub struct Chain {
 }
 
 impl Chain {
-    /// Create a new blockchain
+    /// Create a new, empty blockchain
     pub fn new() -> Self {
         Self { blocks: Vec::new() }
     }
@@ -90,13 +91,14 @@ impl Chain {
         }
     }
 
-    /// Sets the chains blocks to the remote chain if it is longer
+    /// Sets this chain's blocks to the remote chain if it is longer
     pub async fn choose_chain(
         &mut self,
         remote: Vec<Block>,
         difficulty_prefix: impl AsRef<str>,
     ) -> anyhow::Result<()> {
         self.blocks = choose_chain(self.blocks.clone(), remote, difficulty_prefix).await?;
+
         Ok(())
     }
 }

@@ -1,9 +1,6 @@
 use std::collections::HashSet;
 
-use libp2p::floodsub::*;
-use libp2p::mdns::*;
-use libp2p::swarm::*;
-use libp2p::*;
+use libp2p::{floodsub::*, identity, mdns::*, swarm::*, NetworkBehaviour, PeerId};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -85,6 +82,7 @@ impl Behavior {
             difficulty_prefix: difficulty_prefix.into(),
             chain,
         };
+
         behaviour.protocol.subscribe(CHAIN_TOPIC.clone());
         behaviour.protocol.subscribe(BLOCK_TOPIC.clone());
 
@@ -99,7 +97,7 @@ impl Behavior {
         &mut self.chain
     }
 
-    pub fn protocol_mut(&self) -> &mut Floodsub {
+    pub fn protocol_mut(&mut self) -> &mut Floodsub {
         &mut self.protocol
     }
 }
@@ -135,10 +133,12 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
                     info!("Response from {}:", msg.source);
                     resp.blocks.iter().for_each(|r| info!("{:?}", r));
 
-                    self.chain
-                        .choose_chain(resp.blocks, &self.difficulty_prefix)
-                        .await
-                        .unwrap();
+                    tokio::spawn(async move {
+                        self.chain
+                            .choose_chain(resp.blocks, &self.difficulty_prefix)
+                            .await
+                            .unwrap();
+                    });
                 }
             } else if let Ok(resp) = serde_json::from_slice::<LocalChainRequest>(&msg.data) {
                 info!("sending local chain to {}", msg.source.to_string());
@@ -153,7 +153,12 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
                 }
             } else if let Ok(block) = serde_json::from_slice::<Block>(&msg.data) {
                 info!("received new block from {}", msg.source.to_string());
-                self.chain.try_add_block(block, &self.difficulty_prefix);
+                tokio::spawn(async move {
+                    self.chain
+                        .try_add_block(block, &self.difficulty_prefix)
+                        .await
+                        .unwrap();
+                });
             }
         }
     }

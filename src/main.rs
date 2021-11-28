@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+
 mod block;
 mod chain;
 mod p2p;
@@ -18,7 +21,7 @@ use tokio::{
     sync::mpsc,
     time::sleep,
 };
-use tracing::{error, info, Level};
+use tracing::{debug, error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::chain::Chain;
@@ -100,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(p2p::EventType::LocalChainResponse(response.unwrap()))
                 },
                 event = swarm.select_next_some() => {
-                    info!("Unhandled Swarm Event: {:?}", event);
+                    debug!("Unhandled Swarm Event: {:?}", event);
                     None
                 },
             }

@@ -85,6 +85,7 @@ async fn mine_block(
     }
 }
 
+/// Holds data for a block in the blockchain
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Block {
     /// The block id (index)
@@ -129,20 +130,14 @@ impl Block {
         let previous_block_hash = previous_block_hash.into();
         let data = data.into();
 
-        let now = Utc::now();
-        let (nonce, hash) = mine_block(
-            id,
-            now.timestamp(),
-            &previous_block_hash,
-            &data,
-            difficulty_prefix,
-        )
-        .await?;
+        let now = Utc::now().timestamp();
+        let (nonce, hash) =
+            mine_block(id, now, &previous_block_hash, &data, difficulty_prefix).await?;
 
         Ok(Self {
             id,
             hash,
-            timestamp: now.timestamp(),
+            timestamp: now,
             previous_block_hash,
             data,
             nonce,
@@ -159,7 +154,7 @@ impl Block {
         &self.hash
     }
 
-    /// Checks if the given block is valid
+    /// Checks if this block is valid given a previous block
     pub async fn is_valid(
         &self,
         previous_block: &Block,
