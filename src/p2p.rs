@@ -1,9 +1,10 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use libp2p::{floodsub::*, identity, mdns::*, swarm::*, NetworkBehaviour, PeerId};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info};
 
 use crate::block::Block;
@@ -63,7 +64,7 @@ pub struct Behavior {
 
     /// Our blockchain
     #[behaviour(ignore)]
-    chain: Chain,
+    chain: Arc<RwLock<Chain>>,
 }
 
 impl Behavior {
@@ -80,7 +81,7 @@ impl Behavior {
             init_sender,
             response_sender,
             difficulty_prefix: difficulty_prefix.into(),
-            chain,
+            chain: Arc::new(RwLock::new(chain)),
         };
 
         behaviour.protocol.subscribe(CHAIN_TOPIC.clone());
@@ -89,12 +90,8 @@ impl Behavior {
         Ok(behaviour)
     }
 
-    pub fn chain(&self) -> &Chain {
-        &self.chain
-    }
-
-    pub fn chain_mut(&mut self) -> &mut Chain {
-        &mut self.chain
+    pub fn chain(&self) -> Arc<RwLock<Chain>> {
+        self.chain.clone()
     }
 
     pub fn protocol_mut(&mut self) -> &mut Floodsub {
@@ -133,9 +130,13 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
                     info!("Response from {}:", msg.source);
                     resp.blocks.iter().for_each(|r| info!("{:?}", r));
 
+                    let chain = self.chain.clone();
+                    let difficulty_prefix = self.difficulty_prefix.clone();
                     tokio::spawn(async move {
-                        self.chain
-                            .choose_chain(resp.blocks, &self.difficulty_prefix)
+                        chain
+                            .write()
+                            .await
+                            .choose_chain(resp.blocks, &difficulty_prefix)
                             .await
                             .unwrap();
                     });
@@ -144,18 +145,27 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
                 info!("sending local chain to {}", msg.source.to_string());
                 let peer_id = resp.from_peer_id;
                 if PEER_ID.to_string() == peer_id {
-                    if let Err(e) = self.response_sender.send(ChainResponse {
-                        blocks: self.chain.blocks().clone(),
-                        receiver: msg.source.to_string(),
-                    }) {
-                        error!("error sending response via channel, {}", e);
-                    }
+                    let response_sender = self.response_sender.clone();
+                    let chain = self.chain.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = response_sender.send(ChainResponse {
+                            blocks: chain.read().await.blocks().clone(),
+                            receiver: msg.source.to_string(),
+                        }) {
+                            error!("error sending response via channel, {}", e);
+                        }
+                    });
                 }
             } else if let Ok(block) = serde_json::from_slice::<Block>(&msg.data) {
                 info!("received new block from {}", msg.source.to_string());
+
+                let chain = self.chain.clone();
+                let difficulty_prefix = self.difficulty_prefix.clone();
                 tokio::spawn(async move {
-                    self.chain
-                        .try_add_block(block, &self.difficulty_prefix)
+                    chain
+                        .write()
+                        .await
+                        .try_add_block(block, &difficulty_prefix)
                         .await
                         .unwrap();
                 });
@@ -180,10 +190,11 @@ pub fn handle_print_peers(swarm: &Swarm<Behavior>) {
     peers.iter().for_each(|p| info!("{}", p));
 }
 
-pub fn handle_print_chain(swarm: &Swarm<Behavior>) {
+pub async fn handle_print_chain(swarm: &Swarm<Behavior>) {
     info!("Local Blockchain:");
 
-    let pretty_json = serde_json::to_string_pretty(&swarm.behaviour().chain.blocks()).unwrap();
+    let pretty_json =
+        serde_json::to_string_pretty(&swarm.behaviour().chain.read().await.blocks()).unwrap();
     info!("{}", pretty_json);
 }
 
@@ -194,19 +205,24 @@ pub async fn handle_create_block(
     if let Some(data) = cmd.as_ref().strip_prefix("create b") {
         let behaviour = swarm.behaviour_mut();
 
-        let latest_block = behaviour.chain.last().unwrap();
-        let block = Block::new(
-            latest_block.id() + 1,
-            latest_block.hash().clone(),
-            data.to_owned(),
-            &behaviour.difficulty_prefix,
-        )
-        .await?;
+        let block = {
+            let chain = behaviour.chain.read().await;
+            let latest_block = chain.last().unwrap();
+            Block::new(
+                latest_block.id() + 1,
+                latest_block.hash().clone(),
+                data.to_owned(),
+                &behaviour.difficulty_prefix,
+            )
+            .await?
+        };
 
         let json = serde_json::to_string(&block).unwrap();
 
         if behaviour
             .chain
+            .write()
+            .await
             .try_add_block(block, &behaviour.difficulty_prefix)
             .await?
         {

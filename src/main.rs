@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
             match event {
                 p2p::EventType::Init => {
                     let peers = p2p::get_list_peers(&swarm);
-                    swarm.behaviour_mut().chain_mut().genesis();
+                    swarm.behaviour_mut().chain().write().await.genesis();
 
                     info!("connected nodes: {}", peers.len());
                     if !peers.is_empty() {
@@ -137,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 p2p::EventType::Input(line) => match line.as_str() {
                     "ls p" => p2p::handle_print_peers(&swarm),
-                    cmd if cmd.starts_with("ls c") => p2p::handle_print_chain(&swarm),
+                    cmd if cmd.starts_with("ls c") => p2p::handle_print_chain(&swarm).await,
                     cmd if cmd.starts_with("create b") => {
                         p2p::handle_create_block(cmd, &mut swarm).await?
                     }
