@@ -67,7 +67,7 @@ impl App {
                 // init the chain
                 swarm.behaviour_mut().chain().write().await.genesis();
 
-                let peers = p2p::get_list_peers(&swarm);
+                let peers = p2p::get_list_peers(swarm);
                 info!("connected nodes: {}", peers.len());
 
                 if !peers.is_empty() {
@@ -91,8 +91,8 @@ impl App {
                     .publish(p2p::CHAIN_TOPIC.clone(), json.as_bytes());
             }
             p2p::EventType::Input(line) => match line.as_str() {
-                "ls p" => p2p::handle_print_peers(&swarm),
-                cmd if cmd.starts_with("ls c") => p2p::handle_print_chain(&swarm).await,
+                "ls p" => p2p::handle_print_peers(swarm),
+                cmd if cmd.starts_with("ls c") => p2p::handle_print_chain(swarm).await,
                 cmd if cmd.starts_with("create b") => p2p::handle_create_block(cmd, swarm).await?,
                 _ => error!("unknown command"),
             },
