@@ -1,7 +1,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use libp2p::{floodsub::*, identity, mdns::*, swarm::*, NetworkBehaviour, PeerId};
+use libp2p::{
+    floodsub::{Floodsub, FloodsubEvent, Topic},
+    identity,
+    mdns::{Mdns, MdnsEvent},
+    swarm::{NetworkBehaviourEventProcess, Swarm},
+    NetworkBehaviour, PeerId,
+};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
@@ -13,7 +19,7 @@ use crate::chain::Chain;
 // TODO: floodsub is not the most efficient protocol
 // see the article for details on going deeper here
 
-// libp2p peer identity
+// random peer identity
 pub static KEYS: Lazy<identity::Keypair> = Lazy::new(identity::Keypair::generate_ed25519);
 pub static PEER_ID: Lazy<PeerId> = Lazy::new(|| PeerId::from(KEYS.public()));
 
@@ -43,7 +49,7 @@ pub enum EventType {
 
 #[derive(NetworkBehaviour)]
 #[behaviour(event_process = true)]
-pub struct Behavior {
+pub struct Behaviour {
     /// P2P protocol instance
     protocol: Floodsub,
 
@@ -59,7 +65,7 @@ pub struct Behavior {
     chain: Arc<RwLock<Chain>>,
 }
 
-impl Behavior {
+impl Behaviour {
     /// Creates a new behavior
     pub async fn new(
         chain: Chain,
@@ -88,7 +94,7 @@ impl Behavior {
 }
 
 /// Handle Mdns events
-impl NetworkBehaviourEventProcess<MdnsEvent> for Behavior {
+impl NetworkBehaviourEventProcess<MdnsEvent> for Behaviour {
     fn inject_event(&mut self, event: MdnsEvent) {
         match event {
             // add new nodes
@@ -110,7 +116,7 @@ impl NetworkBehaviourEventProcess<MdnsEvent> for Behavior {
 }
 
 /// Hadle Floodsub events
-impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
+impl NetworkBehaviourEventProcess<FloodsubEvent> for Behaviour {
     fn inject_event(&mut self, event: FloodsubEvent) {
         if let FloodsubEvent::Message(msg) = event {
             if let Ok(resp) = serde_json::from_slice::<ChainResponse>(&msg.data) {
@@ -150,7 +156,7 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for Behavior {
     }
 }
 
-pub fn get_list_peers(swarm: &Swarm<Behavior>) -> Vec<String> {
+pub fn get_list_peers(swarm: &Swarm<Behaviour>) -> Vec<String> {
     info!("Discovered Peers:");
 
     let nodes = swarm.behaviour().mdns.discovered_nodes();
@@ -161,12 +167,12 @@ pub fn get_list_peers(swarm: &Swarm<Behavior>) -> Vec<String> {
     unique_peers.iter().map(|p| p.to_string()).collect()
 }
 
-pub fn handle_print_peers(swarm: &Swarm<Behavior>) {
+pub fn handle_print_peers(swarm: &Swarm<Behaviour>) {
     let peers = get_list_peers(swarm);
     peers.iter().for_each(|p| info!("{}", p));
 }
 
-pub async fn handle_print_chain(swarm: &Swarm<Behavior>) {
+pub async fn handle_print_chain(swarm: &Swarm<Behaviour>) {
     info!("Local Blockchain:");
 
     let pretty_json =
@@ -176,7 +182,7 @@ pub async fn handle_print_chain(swarm: &Swarm<Behavior>) {
 
 pub async fn handle_create_block(
     cmd: impl AsRef<str>,
-    swarm: &mut Swarm<Behavior>,
+    swarm: &mut Swarm<Behaviour>,
 ) -> anyhow::Result<()> {
     if let Some(data) = cmd.as_ref().strip_prefix("create b") {
         let behaviour = swarm.behaviour_mut();

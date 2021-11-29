@@ -2,12 +2,13 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use libp2p::{
+    core::muxing::StreamMuxerBox,
+    core::transport,
     core::upgrade,
-    mplex,
-    noise::{Keypair, NoiseConfig, X25519Spec},
+    mplex, noise,
     swarm::{Swarm, SwarmBuilder},
     tcp::TokioTcpConfig,
-    Transport,
+    PeerId, Transport,
 };
 use tokio::{
     io::{stdin, AsyncBufReadExt, BufReader},
@@ -23,44 +24,88 @@ use crate::p2p;
 pub struct App;
 
 impl App {
-    pub async fn run(&self) -> anyhow::Result<()> {
-        info!("Peer Id: {}", p2p::PEER_ID.clone());
+    fn create_transport() -> anyhow::Result<transport::Boxed<(PeerId, StreamMuxerBox)>> {
+        // use noise for authentication
+        let auth_keys = noise::Keypair::<noise::X25519Spec>::new().into_authentic(&p2p::KEYS)?;
 
-        // create event channels
-        let (init_sender, mut init_rcv) = mpsc::unbounded_channel();
-        let (response_sender, mut response_rcv) = mpsc::unbounded_channel();
-
-        // create auth keys
-        let auth_keys = Keypair::<X25519Spec>::new().into_authentic(&p2p::KEYS)?;
-
-        // create transport
+        // create a tokio-based TCP transport
         let transp = TokioTcpConfig::new()
+            .nodelay(true)
             .upgrade(upgrade::Version::V1)
-            .authenticate(NoiseConfig::xx(auth_keys).into_authenticated())
+            .authenticate(noise::NoiseConfig::xx(auth_keys).into_authenticated())
             .multiplex(mplex::MplexConfig::new())
             .boxed();
 
-        // create p2p behavior
-        let behaviour = p2p::Behavior::new(Chain::new(), response_sender).await?;
+        Ok(transp)
+    }
 
-        // create the p2p swarm
+    async fn create_swarm(
+        response_sender: mpsc::UnboundedSender<p2p::ChainResponse>,
+    ) -> anyhow::Result<Swarm<p2p::Behaviour>> {
+        let transp = Self::create_transport()?;
+        let behaviour = p2p::Behaviour::new(Chain::new(), response_sender).await?;
+
         let mut swarm = SwarmBuilder::new(transp, behaviour, *p2p::PEER_ID)
+            // spawn background tasks on the tokio runtime
             .executor(Box::new(|fut| {
                 tokio::spawn(fut);
             }))
             .build();
 
-        // start the swawrm
+        // start the swarm listening
         Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-        // spawn a delayed init event
-        tokio::spawn(async move {
-            sleep(Duration::from_secs(1)).await;
+        Ok(swarm)
+    }
 
-            info!("sending init event");
-            init_sender.send(true).unwrap();
-        });
+    async fn handle_event(
+        event: p2p::EventType,
+        swarm: &mut Swarm<p2p::Behaviour>,
+    ) -> anyhow::Result<()> {
+        match event {
+            p2p::EventType::Init => {
+                // init the chain
+                swarm.behaviour_mut().chain().write().await.genesis();
 
+                let peers = p2p::get_list_peers(&swarm);
+                info!("connected nodes: {}", peers.len());
+
+                if !peers.is_empty() {
+                    // request the chain from the last peer in the list
+                    let req = p2p::LocalChainRequest {
+                        from_peer_id: peers.iter().last().unwrap().to_string(),
+                    };
+
+                    let json = serde_json::to_string(&req)?;
+                    swarm
+                        .behaviour_mut()
+                        .protocol_mut()
+                        .publish(p2p::CHAIN_TOPIC.clone(), json.as_bytes());
+                }
+            }
+            p2p::EventType::LocalChainResponse(resp) => {
+                let json = serde_json::to_string(&resp)?;
+                swarm
+                    .behaviour_mut()
+                    .protocol_mut()
+                    .publish(p2p::CHAIN_TOPIC.clone(), json.as_bytes());
+            }
+            p2p::EventType::Input(line) => match line.as_str() {
+                "ls p" => p2p::handle_print_peers(&swarm),
+                cmd if cmd.starts_with("ls c") => p2p::handle_print_chain(&swarm).await,
+                cmd if cmd.starts_with("create b") => p2p::handle_create_block(cmd, swarm).await?,
+                _ => error!("unknown command"),
+            },
+        }
+
+        Ok(())
+    }
+
+    async fn do_run(
+        mut init_rcv: mpsc::UnboundedReceiver<bool>,
+        mut response_rcv: mpsc::UnboundedReceiver<p2p::ChainResponse>,
+        mut swarm: Swarm<p2p::Behaviour>,
+    ) -> anyhow::Result<()> {
         let mut stdin = BufReader::new(stdin()).lines();
 
         loop {
@@ -81,41 +126,29 @@ impl App {
             };
 
             if let Some(event) = evt {
-                match event {
-                    p2p::EventType::Init => {
-                        let peers = p2p::get_list_peers(&swarm);
-                        swarm.behaviour_mut().chain().write().await.genesis();
-
-                        info!("connected nodes: {}", peers.len());
-                        if !peers.is_empty() {
-                            let req = p2p::LocalChainRequest {
-                                from_peer_id: peers.iter().last().unwrap().to_string(),
-                            };
-
-                            let json = serde_json::to_string(&req)?;
-                            swarm
-                                .behaviour_mut()
-                                .protocol_mut()
-                                .publish(p2p::CHAIN_TOPIC.clone(), json.as_bytes());
-                        }
-                    }
-                    p2p::EventType::LocalChainResponse(resp) => {
-                        let json = serde_json::to_string(&resp)?;
-                        swarm
-                            .behaviour_mut()
-                            .protocol_mut()
-                            .publish(p2p::CHAIN_TOPIC.clone(), json.as_bytes());
-                    }
-                    p2p::EventType::Input(line) => match line.as_str() {
-                        "ls p" => p2p::handle_print_peers(&swarm),
-                        cmd if cmd.starts_with("ls c") => p2p::handle_print_chain(&swarm).await,
-                        cmd if cmd.starts_with("create b") => {
-                            p2p::handle_create_block(cmd, &mut swarm).await?
-                        }
-                        _ => error!("unknown command"),
-                    },
-                }
+                Self::handle_event(event, &mut swarm).await?;
             }
         }
+    }
+
+    pub async fn run(&self) -> anyhow::Result<()> {
+        info!("Peer Id: {}", p2p::PEER_ID.clone());
+
+        // create event channels
+        let (init_sender, init_rcv) = mpsc::unbounded_channel();
+        let (response_sender, response_rcv) = mpsc::unbounded_channel();
+
+        // create the swarm
+        let swarm = Self::create_swarm(response_sender).await?;
+
+        // spawn a delayed init event
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(1)).await;
+
+            info!("sending init event");
+            init_sender.send(true).unwrap();
+        });
+
+        Self::do_run(init_rcv, response_rcv, swarm).await
     }
 }
